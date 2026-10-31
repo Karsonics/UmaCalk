@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# tool output
+runs/
+history.xlsx
+*.log
+
+# local screenshots (contain account info, never commit)
+Samples/
+data/learned_names.json
+
+# editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

@@ -1,0 +1,25 @@
+# umaCalk configuration
+window_title = "umamusume"
+output_dir = "runs"
+history_file = "history.xlsx"
+# leave empty to auto-pick the monitor holding the game window
+monitor_device = ""
+# auto | bettercam | mss | pil
+capture_backend = "auto"
+
+# time (seconds) to wait after each scroll and click
+scroll_settle = 0.35
+click_pause = 0.6
+
+# capture the per-race score breakdown as well as the uma list
+capture_details = true
+# click through the five races on the Race Results screen
+auto_click_races = true
+# export automatically once the race details finish
+auto_save = true
+
+# OCR upscale target: 1400 works for windowed and fullscreen
+ocr_target_width = 1400
+# fuzzy name match threshold (0-100)
+name_threshold = 82.0
+max_frames = 60

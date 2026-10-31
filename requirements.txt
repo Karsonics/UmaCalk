@@ -1,0 +1,13 @@
+pillow>=10
+numpy>=1.26
+opencv-python-headless>=4.9
+rapidocr>=3.0
+onnxruntime>=1.17
+openpyxl>=3.1
+pywin32>=306
+pyautogui>=0.9.54
+mss>=9
+rapidfuzz>=3.6
+pynput>=1.7
+pystray>=0.19
+tomli-w>=1.0

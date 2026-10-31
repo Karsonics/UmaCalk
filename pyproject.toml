@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "umacalk"
+version = "0.1.0"
+description = "Team Trials result capture for Umamusume: Pretty Derby"
+requires-python = ">=3.10"
+dependencies = [
+    "pillow>=10",
+    "numpy>=1.26",
+    "opencv-python-headless>=4.9",
+    "rapidocr>=3.0",
+    "onnxruntime>=1.17",
+    "openpyxl>=3.1",
+    "pywin32>=306; sys_platform == 'win32'",
+    "pyautogui>=0.9.54",
+    "mss>=9",
+    "rapidfuzz>=3.6",
+    "pynput>=1.7",
+    "pystray>=0.19",
+    "tomli-w>=1.0",
+]
+
+[project.scripts]
+umacalk = "umacalk.cli:main"
+umacalk-gui = "umacalk.ui:main"
+
+[tool.setuptools.packages.find]
+include = ["umacalk*"]
