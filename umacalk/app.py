@@ -191,53 +191,121 @@ def _save_diag(dump_dir: str | None, name: str, img, ocr: Ocr) -> None:
         pass
 
 
+def _info_point(img, panel, bar_y: float, pitch: float) -> tuple[int, int]:
+    """Centre of the circular (i) button on a Score Info row.
+
+    Measured from the list layout: ~0.92 of the panel width horizontally and
+    a quarter of a row above the green bar, level with the name/score line.
+    A small round blob near that point is used to snap the click exactly.
+    """
+    import cv2
+
+    by = panel.y + bar_y
+    ex = int(round(panel.x + 0.92 * panel.w))
+    ey = int(round(by - 0.25 * pitch))
+    half = 14
+    x0, x1 = max(0, ex - half), min(img.shape[1], ex + half)
+    y0, y1 = max(0, ey - half), min(img.shape[0], ey + half)
+    if x1 <= x0 or y1 <= y0:
+        return ex, ey
+    crop = img[y0:y1, x0:x1]
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    mask = (gray < 160).astype(np.uint8)
+    count, _, stats, cents = cv2.connectedComponentsWithStats(mask, 8)
+    best = None
+    for i in range(1, count):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        bw = int(stats[i, cv2.CC_STAT_WIDTH])
+        bh = int(stats[i, cv2.CC_STAT_HEIGHT])
+        if not (30 <= area <= 900 and 9 <= bw <= 26 and 9 <= bh <= 26):
+            continue
+        dist = abs(cents[i][0] - half) + abs(cents[i][1] - half)
+        if best is None or dist < best[0]:
+            best = (dist, cents[i])
+    if best is not None and best[0] <= 10:
+        return int(round(x0 + best[1][0])), int(round(y0 + best[1][1]))
+    return ex, ey
+
+
+def _find_uma_row(session: Session, name: str, tries: int = 40):
+    from .scan_list import parse_frame as parse_list_frame
+
+    drv = session.driver
+    img = drv.grab()
+    frame = parse_list_frame(img, session.ocr, session.resolver)
+    if frame.panel is None:
+        return None, None, None
+    drv.scroll_at(frame.panel.cx, frame.panel.cy, 30)      # back to the top
+    for _ in range(tries):
+        img = drv.grab()
+        frame = parse_list_frame(img, session.ocr, session.resolver)
+        if frame.panel is None:
+            return None, None, None
+        for row in frame.rows:
+            if row.name == name:
+                return frame, row, img
+        drv.scroll_at(frame.panel.cx, frame.panel.cy, -1)
+    return None, None, None
+
+
 def step_races(session: Session, expect: int = 5) -> list[RaceDetail]:
+    """Open one race's Score Details per distance, from the Score Info list.
+
+    Clicking a race row on the Race Results popup only opens the placing
+    summary; the itemised breakdown lives behind the (i) button of any uma in
+    that race, so one uma per distance is enough to reach each of the five.
+    """
+    from .model import DISTANCES
+
     cfg = session.cfg
     _ensure_live(session)
-    dump_dir = None
+    diag = None
     if cfg.save_frames:
-        dump_dir = os.path.join(cfg.output_path, "diag", session.run.run_id)
-        session.log(f"diagnostic frames -> {dump_dir}")
+        diag = os.path.join(cfg.output_path, "diag", session.run.run_id)
+        session.log(f"diagnostic frames -> {diag}")
+
+    if not session.run.rows:
+        raise RuntimeError("scan the uma list first (Score Info), then the races")
+
+    targets = []
+    for dist in DISTANCES:
+        group = [r for r in session.run.rows if r.distance == dist and r.score]
+        if group:
+            targets.append(max(group, key=lambda r: r.score))
+
     races: list[RaceDetail] = []
-    for n in range(1, expect + 1):
-        img = session.driver.grab()
-        entries = find_race_entries(img, session.ocr)
-        if len(entries) < 3:
-            message = "race list not found - open Team Trials > See All Race Results first"
-            if not races:
-                raise RuntimeError(message)
-            session.log(message)
-            break
-        target = next((e for e in entries if e[0] == n), None)
-        if target is None:
-            session.log(f"race {n} not on screen, skipping")
+    for target in targets:
+        frame, row, img = _find_uma_row(session, target.name)
+        if row is None:
+            session.log(f"{target.name}: not found in the list, skipping {target.distance}")
             continue
-        _, x, y = target
-        session.log(f"race {n}: clicking ({x},{y})")
+        x, y = _info_point(img, frame.panel, row.y, frame.pitch)
+        session.log(f"{target.distance}: opening Score Details via {target.name}")
         session.driver.click_at(x, y, pause=cfg.click_pause)
-        if dump_dir:
-            _save_diag(dump_dir, f"r{n}_after_click",
+        if diag:
+            _save_diag(diag, f"{target.distance.lower()}_after_click",
                        session.driver.grab(), session.ocr)
         try:
             res = scan_panel(
-                session.driver, session.ocr, expect_race=n,
+                session.driver, session.ocr,
                 log=session.log, max_frames=cfg.max_frames,
-                dump_dir=os.path.join(dump_dir, f"r{n}") if dump_dir else None,
+                dump_dir=os.path.join(diag, target.distance.lower()) if diag else None,
             )
         except Exception as exc:  # one broken race must not abort the rest
-            session.log(f"race {n}: scan failed - {exc}")
-            session.warnings.append(f"race {n}: {exc}")
+            session.log(f"{target.distance}: scan failed - {exc}")
+            session.warnings.append(f"{target.distance}: {exc}")
             _close_panel(session)
             continue
         if res.race is None:
             session.warnings.extend(res.warnings)
-            session.log(f"race {n}: " + "; ".join(res.warnings))
+            session.log(f"{target.distance}: " + "; ".join(res.warnings))
             _close_panel(session)
             continue
         races.append(res.race)
         session.warnings.extend(res.race.warnings)
         session.log(
-            f"race {n}: {len(res.race.umas)} umas, {sum(len(u.cards) for u in res.race.umas)} cards")
+            f"{target.distance}: race {res.race.race_no}, {len(res.race.umas)} umas, "
+            f"{sum(len(u.cards) for u in res.race.umas)} cards")
         _close_panel(session)
     session.run.races = races
     session.run.match_total = None
