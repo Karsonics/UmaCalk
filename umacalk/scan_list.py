@@ -8,10 +8,12 @@ from typing import Callable, Protocol
 import numpy as np
 
 from . import detect
-from .model import Rect, TextLine, UmaRow
+from .model import DISTANCES, Rect, TextLine, UmaRow
 from .names import NameResolver
 from .ocr import Ocr
 from .parse import match_distance, parse_int
+
+from rapidfuzz import fuzz
 
 # Field geometry as fractions of the panel box (measured on real captures and
 # identical across windowed / borderless 1920x1080).
@@ -19,6 +21,10 @@ NAME_X_MAX = 0.62
 SCORE_X_MIN = 0.62
 PILL_X_MAX = 0.34
 NAME_GAP_MAX = 0.26      # x row pitch, distance from name baseline to bar top
+EDGE_INSET = 0.025       # rows clipped by the panel edge are not trustworthy
+MAX_UMAS = 15            # 5 distances x 3 slots
+RAW_SIMILAR = 88.0       # same raw text read twice under different matches
+
 
 
 class Driver(Protocol):
@@ -49,6 +55,23 @@ def _pick_name(cands: list[TextLine], bar: detect.Bar, pitch: float) -> TextLine
     return best[1] if best else None
 
 
+def _twin(rows: dict[str, UmaRow], row: UmaRow) -> UmaRow | None:
+    """An already-accepted row whose raw OCR text is the same string.
+
+    A clipped or half-scrolled row can OCR into something that fuzzy-matches a
+    *different* character, so the same physical row gets stored twice. Comparing
+    the raw text catches that; comparing resolved names never would.
+    """
+    raw = (row.raw or {}).get("name")
+    if not raw:
+        return None
+    for other in rows.values():
+        other_raw = (other.raw or {}).get("name")
+        if other_raw and fuzz.WRatio(raw, other_raw) >= RAW_SIMILAR:
+            return other
+    return None
+
+
 def parse_frame(
     img: np.ndarray,
     ocr: Ocr,
@@ -69,6 +92,10 @@ def parse_frame(
     w, h = panel.w, panel.h
     rows: list[UmaRow] = []
     for bar in bars:
+        # A row whose bar touches the panel edge is clipped by the viewport: its
+        # name/score text is half cut and OCRs into a different (wrong) uma.
+        if bar.rect.y < EDGE_INSET * h or bar.rect.y2 > (1 - EDGE_INSET) * h:
+            continue
         band_top = bar.rect.y - 0.36 * pitch
         band_bot = bar.rect.y2 + 0.32 * pitch
         in_band = [ln for ln in lines if band_top <= ln.cy <= band_bot]
@@ -76,6 +103,8 @@ def parse_frame(
         score_line = None
         for ln in in_band:
             if ln.x1 < SCORE_X_MIN * w:
+                continue
+            if ln.y1 <= 1 or ln.y2 >= h - 1:
                 continue
             val = parse_int(ln.text)
             if val is None or not (500 <= val <= 200_000):
@@ -89,6 +118,8 @@ def parse_frame(
             if ln.x2 < NAME_X_MAX * w
             and ln.x1 < 0.40 * w
             and ln.h >= 0.10 * pitch
+            and ln.y1 > 1 and ln.y2 < h - 1
+            and len(ln.text.strip()) >= 4
             and not ln.text.upper().startswith(("MVP", "RANK"))
             and match_distance(ln.text) is None
         ]
@@ -201,12 +232,25 @@ def scan(
         for row in frame.rows:
             if row.name == "?":
                 continue
-            if row.name not in rows:
+            existing = rows.get(row.name)
+            if existing is None:
+                twin = _twin(rows, row)
+                if twin is not None:
+                    if row.score and twin.score and row.score != twin.score:
+                        warnings.append(
+                            f"{twin.name}: conflicting scores {twin.score} vs {row.score}")
+                    if row.confidence > twin.confidence:
+                        twin.score = row.score or twin.score
+                        twin.confidence = row.confidence
+                        twin.distance = row.distance or twin.distance
+                        twin.raw = row.raw
+                    continue
                 rows[row.name] = row
                 fresh += 1
-            elif row.score and rows[row.name].score and row.score != rows[row.name].score:
+                say(f"  + {row.name} (raw={row.raw.get('name')!r}, conf={row.confidence:.2f})")
+            elif row.score and existing.score and row.score != existing.score:
                 warnings.append(
-                    f"{row.name}: conflicting scores {rows[row.name].score} vs {row.score}")
+                    f"{row.name}: conflicting scores {existing.score} vs {row.score}")
         warnings.extend(frame.warnings)
         if on_frame:
             on_frame(frame)
@@ -221,7 +265,7 @@ def scan(
         prev_nav = nav
         if quiet >= 2:
             break
-        if len(rows) >= 15 and fresh == 0:
+        if len(rows) >= MAX_UMAS and fresh == 0:
             break
 
         driver.scroll_at(cx, cy, -1)       # down one notch
@@ -229,5 +273,23 @@ def scan(
 
     if len(rows) < 3:
         warnings.append(f"only {len(rows)} umas read - the list may not have scrolled")
+    if len(rows) > MAX_UMAS:
+        warnings.append(
+            f"{len(rows)} umas read but at most {MAX_UMAS} can race - "
+            f"kept the {MAX_UMAS} most confident readings")
+        keep = sorted(rows.values(), key=lambda r: -r.confidence)[:MAX_UMAS]
+        rows = {r.name: r for r in keep}
+
+    # the game allows three umas per distance, so a fourth reading in one band
+    # is a duplicate of a row read twice, not a real uma
+    for dist in DISTANCES:
+        group = [r for r in rows.values() if r.distance == dist]
+        if len(group) > 3:
+            group.sort(key=lambda r: -r.confidence)
+            for extra in group[3:]:
+                warnings.append(
+                    f"{extra.name}: {len(group)} umas read for {dist}, keeping 3 - dropped")
+                rows.pop(extra.name, None)
+
     ordered = sorted(rows.values(), key=lambda r: -(r.score or 0))
     return ScanResult(ordered, frame.panel, sorted(set(warnings)), frames)

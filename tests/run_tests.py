@@ -16,7 +16,8 @@ from umacalk.app import find_race_entries  # noqa: E402
 from umacalk.ocr import Ocr  # noqa: E402
 from umacalk.parse import match_subrow, parse_int, parse_race_header  # noqa: E402
 from umacalk.scan_detail import scan_panel  # noqa: E402
-from umacalk.scan_list import parse_frame  # noqa: E402
+from umacalk.model import UmaRow  # noqa: E402
+from umacalk.scan_list import parse_frame, _twin  # noqa: E402
 from umacalk.driver import ReplayDriver  # noqa: E402
 from umacalk.names import NameResolver  # noqa: E402
 
@@ -47,6 +48,22 @@ def load(name: str, crop: tuple[int, int, int, int] | None = CROP) -> np.ndarray
         x0, y0, x1, y1 = crop
         img = img[y0:y1, x0:x1]
     return img
+
+
+def test_dedupe() -> None:
+    print("dedupe")
+    gold = UmaRow(name="Gold Ship", score=61272, distance="Long",
+                  raw={"name": "Gold Ship"})
+    rows = {"Gold Ship": gold}
+    # same physical row, clipped text, resolves to a different character
+    twin = UmaRow(name="Gold City", score=61272, distance="Long",
+                  raw={"name": "Gold Shlp"})
+    check("clipped row detected as twin", _twin(rows, twin) is gold)
+    other = UmaRow(name="Vodka", score=56201, distance="Mile",
+                   raw={"name": "Vodka"})
+    check("different uma is not a twin", _twin(rows, other) is None)
+    check("missing raw is never a twin",
+          _twin(rows, UmaRow(name="X", score=None, distance=None)) is None)
 
 
 def test_parse() -> None:
@@ -134,6 +151,7 @@ def main() -> int:
     ocr = Ocr(1400)
     resolver = NameResolver()
     test_parse()
+    test_dedupe()
     test_list(ocr, resolver)
     test_detail(ocr)
     test_race_entries(ocr)
