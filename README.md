@@ -129,7 +129,9 @@ py -3.13 -m umacalk detail Samples\*.png --crop 279,178,1564,875
 py -3.13 -m umacalk probe
 ```
 
-The tests run entirely on the PNGs in `Samples\`; no game required.
+The tests run entirely on the PNGs in `Samples\`; no game required. `Samples\` is
+git-ignored because the screenshots contain your account name — drop your own PNGs
+in to run the suite.
 
 Layout:
 
