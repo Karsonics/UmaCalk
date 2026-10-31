@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Callable
@@ -107,6 +108,15 @@ def _pair_rows(lines: list[TextLine], w: int) -> list[Pair]:
     return pairs
 
 
+def _placement(text: str) -> str | None:
+    """'1st', 'Ist', '1 st', '1ST place' -> '1st'."""
+    t = clean(text).strip()
+    t = re.sub(r"^[Il|]", "1", t)
+    t = re.sub(r"\s+", "", t).lower()
+    m = re.match(r"([1-9])(st|nd|rd|th)", t)
+    return f"{m.group(1)}{m.group(2)}" if m else None
+
+
 def _find_uma_headers(lines: list[TextLine], w: int) -> list[UmaHeader]:
     headers: list[UmaHeader] = []
     for ln in lines:
@@ -121,6 +131,7 @@ def _find_uma_headers(lines: list[TextLine], w: int) -> list[UmaHeader]:
                 if gained is not None:
                     break
         name = None
+        name_cy = None
         bestx = 1e9
         for cand in lines:
             if cand is ln:
@@ -135,44 +146,79 @@ def _find_uma_headers(lines: list[TextLine], w: int) -> list[UmaHeader]:
             if cand.x1 < bestx:
                 bestx = cand.x1
                 name = txt
+                name_cy = cand.cy
         placement = None
-        for cand in lines:
-            if ln.cy - 4.0 * ln.h <= cand.cy <= ln.cy + 1.0 * ln.h and cand.x1 < 0.45 * w:
-                t = clean(cand.text)
-                if t[:1].isdigit() and t[-2:].lower() in ("st", "nd", "rd", "th"):
-                    placement = t
-                    break
+        if name_cy is not None:
+            closest = 1e9
+            for cand in lines:
+                if cand.x1 > 0.55 * w:
+                    continue
+                gap = abs(cand.cy - name_cy)
+                if gap > 1.4 * max(cand.h, ln.h):
+                    continue
+                found = _placement(cand.text)
+                if found and gap < closest:
+                    closest = gap
+                    placement = found
         if name:
             headers.append(UmaHeader(name, gained, placement, ln.cy))
     return headers
 
 
+def _panel_at(img: np.ndarray, x: float, y: float) -> Rect | None:
+    """White panel containing (x, y), found by connected-component probing."""
+    b, g, r = cv2.split(img)
+    mask = ((b > 230) & (g > 230) & (r > 230)).astype(np.uint8)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    h, w = mask.shape[:2]
+    label = 0
+    for dx, dy in ((0, 0), (-18, 0), (18, 0), (0, 14), (0, -14),
+                   (-34, 0), (0, 28), (-34, 14), (34, 14)):
+        px, py = int(x + dx), int(y + dy)
+        if 0 <= px < w and 0 <= py < h and labels[py, px]:
+            label = int(labels[py, px])
+            break
+    if not label:
+        return None
+    x0, y0, bw, bh, area = (int(v) for v in stats[label])
+    if area < 0.02 * w * h:
+        return None
+    if bw < 0.15 * w or bh < 0.15 * h:
+        return None
+    if bw * bh > 0.95 * w * h:
+        return None
+    return Rect(x0, y0, bw, bh)
+
+
 def _locate(img: np.ndarray, ocr: Ocr) -> tuple[Rect, list[TextLine]] | None:
     """Pick the panel that is really the Score Details popup.
 
-    The popup floats over other light UI, so the largest near-white rectangle
-    is often the list behind it. A candidate is accepted only when its header
-    band carries a "Class N, Race N" label.
+    Content first: find the "Class N, Race N" label anywhere on screen and
+    take the white area around it. That works whatever the popup's shape,
+    opacity or background. Falls back to threshold-detected rectangles.
     """
+    for ln in ocr.read(img, scale=1.4):
+        cls, race = parse_race_header(ln.text)
+        if race is None:
+            continue
+        panel = _panel_at(img, ln.x1 - 12, ln.cy)
+        if panel is not None:
+            crop = img[panel.y:panel.y2, panel.x:panel.x2]
+            return panel, ocr.read(crop)
+
     candidates = detect.find_panels(img)
-    fallback: Rect | None = None
     for panel in candidates:
         crop = img[panel.y:panel.y2, panel.x:panel.x2]
         band = crop[: max(8, int(HEADER_BAND * panel.h)), :]
         head = ocr.read(band, scale=3.0)
-        if any(parse_race_header(ln.text)[1] is not None for ln in head):
+        if any(parse_race_header(h.text)[1] is not None for h in head):
             return panel, ocr.read(crop)
-        if fallback is None:
-            fallback = panel
-    if fallback is None:
-        return None
-    # no race header anywhere: accept the largest panel only if it looks like
-    # a score breakdown (covers screens whose header OCRs poorly)
-    crop = img[fallback.y:fallback.y2, fallback.x:fallback.x2]
-    lines = ocr.read(crop)
-    text = " ".join(clean(ln.text).lower() for ln in lines)
-    if "gained score" in text or "team bonus" in text:
-        return fallback, lines
+    for panel in candidates[:2]:
+        crop = img[panel.y:panel.y2, panel.x:panel.x2]
+        lines = ocr.read(crop)
+        text = " ".join(clean(h.text).lower() for h in lines)
+        if "gained score" in text or "team bonus" in text:
+            return panel, lines
     return None
 
 
@@ -414,12 +460,22 @@ def scan_panel(
     for (own, _t, _tot), card in cards.items():
         by_owner.setdefault(own, []).append(card)
     for name in order:
+        uma_cards = sorted(by_owner.get(name, []), key=lambda c: c.y)
+        place = placement.get(name)
+        if place is None:
+            # the ribbon badge often OCRs as artwork; the first card carries
+            # the same information ("1st place", "2nd place", ...)
+            for card in uma_cards:
+                if card.category == "placement":
+                    place = _placement(card.title)
+                    if place:
+                        break
         race.umas.append(
             UmaDetail(
                 name=name,
-                placement=placement.get(name),
+                placement=place,
                 gained=gained.get(name),
-                cards=sorted(by_owner.get(name, []), key=lambda c: c.y),
+                cards=uma_cards,
             )
         )
     race.team_bonus = team_bonus

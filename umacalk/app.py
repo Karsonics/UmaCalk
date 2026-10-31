@@ -174,6 +174,23 @@ def _close_panel(session: Session) -> None:
     session.driver.key("escape")
 
 
+def _save_diag(dump_dir: str | None, name: str, img, ocr: Ocr) -> None:
+    """Write the raw frame and its OCR text so a failure can be replayed."""
+    if not dump_dir:
+        return
+    import cv2
+
+    try:
+        os.makedirs(dump_dir, exist_ok=True)
+        cv2.imwrite(os.path.join(dump_dir, name + ".png"), img)
+        lines = ocr.read(img, scale=1.4)
+        with open(os.path.join(dump_dir, name + ".txt"), "w", encoding="utf-8") as fh:
+            for ln in lines:
+                fh.write(f"{ln.text}\t{ln.x1},{ln.y1},{ln.x2},{ln.y2}\n")
+    except Exception:
+        pass
+
+
 def step_races(session: Session, expect: int = 5) -> list[RaceDetail]:
     cfg = session.cfg
     _ensure_live(session)
@@ -198,6 +215,9 @@ def step_races(session: Session, expect: int = 5) -> list[RaceDetail]:
         _, x, y = target
         session.log(f"race {n}: clicking ({x},{y})")
         session.driver.click_at(x, y, pause=cfg.click_pause)
+        if dump_dir:
+            _save_diag(dump_dir, f"r{n}_after_click",
+                       session.driver.grab(), session.ocr)
         try:
             res = scan_panel(
                 session.driver, session.ocr, expect_race=n,
@@ -239,6 +259,9 @@ class Result:
 def finish(session: Session, *, write_history: bool = True) -> Result:
     run = session.run
     issues = check(run)
+    if not run.rows and not run.races:
+        session.log("nothing captured - no files written")
+        return Result(run, issues)
     out_dir = session.cfg.output_path
     os.makedirs(out_dir, exist_ok=True)
     stem = run.run_id
