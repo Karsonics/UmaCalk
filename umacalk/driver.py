@@ -39,6 +39,15 @@ class LiveDriver:
     def _check(self) -> None:
         if self.abort.is_set():
             raise Aborted("aborted by user")
+        try:
+            import win32gui
+
+            if win32gui.GetForegroundWindow() != self.hwnd:
+                raise Aborted("game window lost focus - scan stopped")
+        except Aborted:
+            raise
+        except Exception:  # noqa: BLE001 - never fail on a diagnostic check
+            pass
 
     def grab(self) -> np.ndarray:
         self._check()
@@ -52,6 +61,7 @@ class LiveDriver:
             if win32gui.IsIconic(self.hwnd):
                 win32gui.ShowWindow(self.hwnd, win32con.SW_RESTORE)
             win32gui.SetForegroundWindow(self.hwnd)
+            time.sleep(0.15)
         except Exception:  # noqa: BLE001 - focus is best effort
             pass
 
@@ -70,7 +80,8 @@ class LiveDriver:
         self._check()
         sx, sy = self.to_screen(x, y)
         pyautogui.moveTo(sx, sy, duration=0.05)
-        pyautogui.scroll(int(notches) * 120)
+        # pyautogui already multiplies by WHEEL_DELTA internally: one unit == one notch.
+        pyautogui.scroll(int(notches))
         time.sleep(self.settle)
 
     def key(self, name: str) -> None:
@@ -96,9 +107,10 @@ class ReplayDriver:
         return self.frames[min(self.index, len(self.frames) - 1)]
 
     def scroll_at(self, x: int, y: int, notches: int) -> None:
-        if notches < 0:
+        # frames are ordered top -> bottom; positive notches scroll up
+        if notches > 0:
             self.index = 0
-        elif notches > 0:
+        elif notches < 0:
             self.index = min(len(self.frames) - 1, self.index + 1)
 
     def click_at(self, x: int, y: int, *, pause: float = 0.0) -> None:

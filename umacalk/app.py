@@ -93,7 +93,36 @@ def open_replay(cfg: Config, frames: list[np.ndarray], log: Logger) -> Session:
 
 # ----------------------------------------------------------------- step 1
 
+def _ensure_live(session: Session) -> None:
+    """Re-probe before every scan: the window may have moved, the capture backend
+    is thread-affine, and we must never send input to another application."""
+    if not isinstance(session.driver, LiveDriver):
+        return
+    prof = probe_mod.probe(session.cfg.window_title)
+    if not prof.hwnd:
+        raise RuntimeError(f"window {session.cfg.window_title!r} not found")
+    if prof.hwnd != session.driver.hwnd:
+        raise RuntimeError("game window changed - restart umaCalk")
+    rect = tuple(prof.client)
+    if rect != tuple(session.driver.rect):
+        session.log(f"window moved or resized to {rect[2]}x{rect[3]} - recalibrating")
+        session.driver.rect = rect
+        session.driver.capturer.rect = rect
+    session.driver.focus()
+    import time
+
+    import win32gui
+
+    for _ in range(3):
+        if win32gui.GetForegroundWindow() == session.driver.hwnd:
+            return
+        time.sleep(0.15)
+        session.driver.focus()
+    raise RuntimeError("game window is not focused - click the game, then try again")
+
+
 def step_list(session: Session) -> Run:
+    _ensure_live(session)
     session.log("reading Score Info ...")
     result = scan_list(
         session.driver, session.ocr, session.resolver,
@@ -148,6 +177,7 @@ def _close_panel(session: Session) -> None:
 
 def step_races(session: Session, expect: int = 5) -> list[RaceDetail]:
     cfg = session.cfg
+    _ensure_live(session)
     races: list[RaceDetail] = []
     for n in range(1, expect + 1):
         img = session.driver.grab()

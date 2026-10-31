@@ -6,6 +6,8 @@ for windowed and borderless modes.
 """
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 
 
@@ -20,21 +22,42 @@ class Capturer:
         self._impl = None
         self._mss = None
         self.name = ""
+        self._tid = threading.get_ident()
+        self._opening = False
         self._open()
 
     def _open(self) -> None:
         order = [self.backend] if self.backend != "auto" else ["bettercam", "mss", "pil"]
         errors: list[str] = []
-        for name in order:
-            try:
-                self._impl = self._make(name)
-                self.name = name
-                if self.looks_black(self._first_frame()):
-                    raise CaptureError("backend returned a black frame")
-                return
-            except Exception as exc:  # noqa: BLE001 - fall through
-                errors.append(f"{name}: {exc}")
-        raise CaptureError("no working capture backend (" + "; ".join(errors) + ")")
+        self._opening = True
+        try:
+            for name in order:
+                try:
+                    self._impl = self._make(name)
+                    self.name = name
+                    if self.looks_black(self._first_frame()):
+                        raise CaptureError("backend returned a black frame")
+                    return
+                except Exception as exc:  # noqa: BLE001 - fall through
+                    errors.append(f"{name}: {exc}")
+            raise CaptureError("no working capture backend (" + "; ".join(errors) + ")")
+        finally:
+            self._opening = False
+
+    def _ensure_thread(self) -> None:
+        """mss and bettercam hold thread-affine handles; rebuild on a new thread."""
+        tid = threading.get_ident()
+        if tid == self._tid:
+            return
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001
+            pass
+        self._impl = None
+        self._mss = None
+        self.name = ""
+        self._tid = tid
+        self._open()
 
     def _first_frame(self) -> np.ndarray:
         import time
@@ -74,6 +97,8 @@ class Capturer:
         raise ValueError(f"unknown backend {name}")
 
     def grab(self) -> np.ndarray:
+        if not self._opening:
+            self._ensure_thread()
         x, y, w, h = self.rect
         if self.name == "bettercam":
             frame = self._impl.get_latest_frame()

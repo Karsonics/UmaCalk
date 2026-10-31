@@ -176,17 +176,27 @@ def scan(
         )
     cx = head.panel.x + head.panel.w // 2
     cy = head.panel.y + head.panel.h // 2
-    driver.scroll_at(cx, cy, -15)          # rewind to the top
+    driver.scroll_at(cx, cy, 30)           # rewind: positive == up
     frame = parse_frame(driver.grab(), ocr, resolver)
 
     rows: dict[str, UmaRow] = {}
     warnings: list[str] = []
     frames = 0
-    stalls = 0
-    prev_sig: tuple | None = None
+    quiet = 0            # consecutive frames that neither moved nor added rows
+    missing = 0          # consecutive frames with no panel at all
+    prev_nav: tuple = ()
 
     while frames < max_frames:
         frames += 1
+        if frame.panel is None:
+            missing += 1
+            if missing >= 2:
+                warnings.append("Score Info panel disappeared - scan stopped")
+                break
+            frame = parse_frame(driver.grab(), ocr, resolver)
+            continue
+        missing = 0
+
         fresh = 0
         for row in frame.rows:
             if row.name == "?":
@@ -202,17 +212,22 @@ def scan(
             on_frame(frame)
         say(f"frame {frames}: {len(frame.rows)} rows in view, {fresh} new, total {len(rows)}")
 
-        sig = tuple(round(b.rect.cy) for b in frame.bars)
-        if sig and sig == prev_sig:
-            stalls += 1
+        # bars within 3px count as the same position
+        nav = tuple(round(b.rect.cy / 3) for b in frame.bars)
+        if fresh == 0 and nav == prev_nav and frame.rows:
+            quiet += 1
         else:
-            stalls = 0
-        prev_sig = sig
-        if stalls >= 2:
+            quiet = 0
+        prev_nav = nav
+        if quiet >= 2:
+            break
+        if len(rows) >= 15 and fresh == 0:
             break
 
-        driver.scroll_at(cx, cy, 1)
+        driver.scroll_at(cx, cy, -1)       # down one notch
         frame = parse_frame(driver.grab(), ocr, resolver)
 
+    if len(rows) < 3:
+        warnings.append(f"only {len(rows)} umas read - the list may not have scrolled")
     ordered = sorted(rows.values(), key=lambda r: -(r.score or 0))
     return ScanResult(ordered, frame.panel, sorted(set(warnings)), frames)

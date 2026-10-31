@@ -240,7 +240,7 @@ def scan_panel(
         )
     cx = frame.panel.x + frame.panel.w // 2
     cy = frame.panel.y + frame.panel.h // 2
-    driver.scroll_at(cx, cy, -15)
+    driver.scroll_at(cx, cy, 30)           # rewind: positive == up
     frame = parse_frame(driver.grab(), ocr)
 
     if expect_race is not None and frame.race_no is not None and frame.race_no != expect_race:
@@ -305,7 +305,7 @@ def scan_panel(
         if stalls >= 2:
             break
 
-        driver.scroll_at(cx, cy, 1)
+        driver.scroll_at(cx, cy, -1)       # down one notch
         frame = parse_frame(driver.grab(), ocr)
         if frame.race_no is not None and race.race_no is not None and frame.race_no != race.race_no:
             race.warnings.append(f"panel changed to race {frame.race_no} mid-scan")

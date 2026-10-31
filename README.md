@@ -156,6 +156,21 @@ umacalk/
 
 ---
 
+## If a scan goes wrong
+
+| Symptom | Cause |
+|---|---|
+| "game window is not focused" | click the game window, then press the hotkey again |
+| "Score Info panel disappeared" | the popup was closed or another screen was opened mid-scan |
+| scan stops after a few rows | the list stopped moving — raise `scroll_settle` to `0.5` |
+| a card is missing from a race | it never fully entered the viewport; rescan that race |
+| names look wrong | double-click the row and correct it, then `F6` |
+
+The tool scrolls **one wheel notch per step** and refuses to send input unless the
+game window is in the foreground, so it cannot run away scrolling another window.
+
+---
+
 ## Notes
 
 - Automation of the game is against Cygames' terms of service. This tool only reads
