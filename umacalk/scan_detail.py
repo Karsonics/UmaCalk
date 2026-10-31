@@ -10,9 +10,13 @@ not attribute anything.
 """
 from __future__ import annotations
 
+import json
+import os
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
+import cv2
 import numpy as np
 
 from . import detect
@@ -23,6 +27,11 @@ from .parse import card_category, clean, match_subrow, parse_int, parse_race_hea
 VALUE_X_MIN = 0.82      # right-aligned value column
 LABEL_X_MAX = 0.72
 TEAM_OWNER = "__team__"
+HEADER_BAND = 0.18      # top fraction of a panel that carries "Class N, Race N"
+
+
+class PanelGone(RuntimeError):
+    """No Score Details popup could be identified in the frame."""
 
 
 @dataclass
@@ -138,12 +147,40 @@ def _find_uma_headers(lines: list[TextLine], w: int) -> list[UmaHeader]:
     return headers
 
 
-def parse_frame(img: np.ndarray, ocr: Ocr) -> FrameParse:
-    panel = detect.find_panel(img)
-    if panel is None:
-        raise RuntimeError("popup panel not found - is a Score Details screen open?")
-    crop = img[panel.y:panel.y2, panel.x:panel.x2]
+def _locate(img: np.ndarray, ocr: Ocr) -> tuple[Rect, list[TextLine]] | None:
+    """Pick the panel that is really the Score Details popup.
+
+    The popup floats over other light UI, so the largest near-white rectangle
+    is often the list behind it. A candidate is accepted only when its header
+    band carries a "Class N, Race N" label.
+    """
+    candidates = detect.find_panels(img)
+    fallback: Rect | None = None
+    for panel in candidates:
+        crop = img[panel.y:panel.y2, panel.x:panel.x2]
+        band = crop[: max(8, int(HEADER_BAND * panel.h)), :]
+        head = ocr.read(band, scale=3.0)
+        if any(parse_race_header(ln.text)[1] is not None for ln in head):
+            return panel, ocr.read(crop)
+        if fallback is None:
+            fallback = panel
+    if fallback is None:
+        return None
+    # no race header anywhere: accept the largest panel only if it looks like
+    # a score breakdown (covers screens whose header OCRs poorly)
+    crop = img[fallback.y:fallback.y2, fallback.x:fallback.x2]
     lines = ocr.read(crop)
+    text = " ".join(clean(ln.text).lower() for ln in lines)
+    if "gained score" in text or "team bonus" in text:
+        return fallback, lines
+    return None
+
+
+def parse_frame(img: np.ndarray, ocr: Ocr) -> FrameParse:
+    found = _locate(img, ocr)
+    if found is None:
+        raise PanelGone("popup panel not found - is a Score Details screen open?")
+    panel, lines = found
     w, h = panel.w, panel.h
     fp = FrameParse(panel=panel, lines=lines)
 
@@ -222,6 +259,56 @@ class DetailScan:
     warnings: list[str] = field(default_factory=list)
 
 
+def _grab(driver, ocr: Ocr, tries: int = 3) -> tuple[FrameParse, np.ndarray] | None:
+    """Grab and parse a frame, tolerating a popup that is mid-animation."""
+    for attempt in range(max(1, tries)):
+        img = driver.grab()
+        try:
+            return parse_frame(img, ocr), img
+        except PanelGone:
+            if attempt + 1 >= max(1, tries):
+                return None
+            time.sleep(0.12)
+    return None
+
+
+def _dump(dump_dir: str | None, race_no: int | None, index: int,
+          img: np.ndarray, frame: FrameParse) -> None:
+    if not dump_dir:
+        return
+    try:
+        os.makedirs(dump_dir, exist_ok=True)
+        stem = f"race{race_no or 0}_{index:02d}"
+        cv2.imwrite(os.path.join(dump_dir, stem + ".png"), img)
+        payload = {
+            "panel": frame.panel.as_tuple(),
+            "race": frame.race_no,
+            "class": frame.class_no,
+            "total": frame.total,
+            "cards": [
+                {
+                    "title": c.title,
+                    "total": c.total,
+                    "balanced": c.balanced,
+                    "rows": [
+                        {"label": r.label, "raw": r.label_raw, "value": r.value}
+                        for r in c.rows
+                    ],
+                }
+                for c in frame.cards
+            ],
+            "lines": [
+                {"text": ln.text, "x1": ln.x1, "y1": ln.y1,
+                 "x2": ln.x2, "y2": ln.y2, "conf": ln.conf}
+                for ln in frame.lines
+            ],
+        }
+        with open(os.path.join(dump_dir, stem + ".json"), "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=1)
+    except Exception:  # diagnostics must never break a scan
+        pass
+
+
 def scan_panel(
     driver,
     ocr: Ocr,
@@ -230,18 +317,26 @@ def scan_panel(
     log: Callable[[str], None] | None = None,
     max_frames: int = 60,
     on_frame: Callable[[FrameParse], None] | None = None,
+    dump_dir: str | None = None,
 ) -> DetailScan:
     say = log or (lambda _m: None)
-    frame = parse_frame(driver.grab(), ocr)
-    if frame.panel is None:
+    got = _grab(driver, ocr)
+    if got is None:
         return DetailScan(
             None,
             warnings=["Score Details screen not found - open it before scanning"],
         )
+    frame, img = got
     cx = frame.panel.x + frame.panel.w // 2
     cy = frame.panel.y + frame.panel.h // 2
     driver.scroll_at(cx, cy, 30)           # rewind: positive == up
-    frame = parse_frame(driver.grab(), ocr)
+    got = _grab(driver, ocr)
+    if got is None:
+        return DetailScan(
+            None,
+            warnings=["Score Details popup vanished before it could be read"],
+        )
+    frame, img = got
 
     if expect_race is not None and frame.race_no is not None and frame.race_no != expect_race:
         return DetailScan(
@@ -257,13 +352,13 @@ def scan_panel(
     team_bonus: DetailCard | None = None
     owner = TEAM_OWNER
     frames = 0
-    stalls = 0
-    prev_sig: tuple | None = None
+    empty = 0
 
     while frames < max_frames:
         frames += 1
         if on_frame:
             on_frame(frame)
+        _dump(dump_dir, race.race_no, frames, img, frame)
 
         # walk this frame's ordered events, carrying ownership forward
         fresh = 0
@@ -296,17 +391,21 @@ def scan_panel(
 
         say(f"frame {frames}: {len(frame.cards)} cards, {fresh} new, total {len(cards)}")
 
-        sig = frame.signature()
-        if sig and sig == prev_sig:
-            stalls += 1
+        if fresh == 0:
+            empty += 1
         else:
-            stalls = 0
-        prev_sig = sig
-        if stalls >= 2:
+            empty = 0
+        if empty >= 2:
+            say("no new cards after two scrolls - stopping")
             break
 
         driver.scroll_at(cx, cy, -1)       # down one notch
-        frame = parse_frame(driver.grab(), ocr)
+        got = _grab(driver, ocr)
+        if got is None:
+            race.warnings.append("Score Details popup closed during the scan")
+            say("popup closed mid-scan - stopping")
+            break
+        frame, img = got
         if frame.race_no is not None and race.race_no is not None and frame.race_no != race.race_no:
             race.warnings.append(f"panel changed to race {frame.race_no} mid-scan")
             break

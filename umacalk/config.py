@@ -22,6 +22,7 @@ class Config:
     capture_details: bool = True
     auto_click_races: bool = True
     auto_save: bool = True
+    save_frames: bool = True
     ocr_target_width: int = 1400
     name_threshold: float = 82.0
     max_frames: int = 60
@@ -76,6 +77,8 @@ click_pause = 0.6
 capture_details = true
 # click through the five races on the Race Results screen
 auto_click_races = true
+# save every captured frame to runs/diag/ for troubleshooting
+save_frames = true
 # export automatically once the race details finish
 auto_save = true
 

@@ -49,17 +49,39 @@ def _panel_candidates(img: np.ndarray, thr: int) -> list[tuple[Rect, float]]:
     return out
 
 
-def find_panel(img: np.ndarray) -> Rect | None:
-    """Locate the light rounded popup panel.
+def _iou(a: Rect, b: Rect) -> float:
+    x1, y1 = max(a.x, b.x), max(a.y, b.y)
+    x2, y2 = min(a.x2, b.x2), min(a.y2, b.y2)
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+    inter = float((x2 - x1) * (y2 - y1))
+    union = a.area + b.area - inter
+    return inter / union if union else 0.0
 
-    Tries progressively looser "near white" thresholds so dimmed/translucent
-    popups (e.g. Race Results over a dark overlay) are still found.
+
+def find_panels(img: np.ndarray, limit: int = 8) -> list[Rect]:
+    """Every plausible panel box, biggest first.
+
+    A popup drawn over another light panel (the Score Info list, for instance)
+    produces several candidates, so callers must verify which one is wanted
+    instead of trusting the largest.
     """
+    out: list[Rect] = []
     for thr in (246, 238, 230, 220, 205, 190):
-        cands = _panel_candidates(img, thr)
-        if cands:
-            return cands[0][0]
-    return None
+        for rect, _fill in _panel_candidates(img, thr):
+            if any(_iou(rect, seen) > 0.55 for seen in out):
+                continue
+            out.append(rect)
+        if len(out) >= limit:
+            break
+    out.sort(key=lambda r: r.area, reverse=True)
+    return out[:limit]
+
+
+def find_panel(img: np.ndarray) -> Rect | None:
+    """Locate the light rounded popup panel (largest candidate)."""
+    panels = find_panels(img, limit=1)
+    return panels[0] if panels else None
 
 
 # --- Score Info rows -------------------------------------------------------

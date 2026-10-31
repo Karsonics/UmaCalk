@@ -165,8 +165,7 @@ def _close_panel(session: Session) -> None:
     from . import detect
 
     img = session.driver.grab()
-    panel = detect.find_panel(img)
-    if panel is not None:
+    for panel in detect.find_panels(img):
         crop = img[panel.y:panel.y2, panel.x:panel.x2]
         for ln in session.ocr.read(crop):
             if clean(ln.text).lower().startswith("close"):
@@ -178,13 +177,20 @@ def _close_panel(session: Session) -> None:
 def step_races(session: Session, expect: int = 5) -> list[RaceDetail]:
     cfg = session.cfg
     _ensure_live(session)
+    dump_dir = None
+    if cfg.save_frames:
+        dump_dir = os.path.join(cfg.output_path, "diag", session.run.run_id)
+        session.log(f"diagnostic frames -> {dump_dir}")
     races: list[RaceDetail] = []
     for n in range(1, expect + 1):
         img = session.driver.grab()
         entries = find_race_entries(img, session.ocr)
         if len(entries) < 3:
-            raise RuntimeError(
-                "race list not found - open Team Trials > See All Race Results first")
+            message = "race list not found - open Team Trials > See All Race Results first"
+            if not races:
+                raise RuntimeError(message)
+            session.log(message)
+            break
         target = next((e for e in entries if e[0] == n), None)
         if target is None:
             session.log(f"race {n} not on screen, skipping")
@@ -192,10 +198,17 @@ def step_races(session: Session, expect: int = 5) -> list[RaceDetail]:
         _, x, y = target
         session.log(f"race {n}: clicking ({x},{y})")
         session.driver.click_at(x, y, pause=cfg.click_pause)
-        res = scan_panel(
-            session.driver, session.ocr, expect_race=n,
-            log=session.log, max_frames=cfg.max_frames,
-        )
+        try:
+            res = scan_panel(
+                session.driver, session.ocr, expect_race=n,
+                log=session.log, max_frames=cfg.max_frames,
+                dump_dir=os.path.join(dump_dir, f"r{n}") if dump_dir else None,
+            )
+        except Exception as exc:  # one broken race must not abort the rest
+            session.log(f"race {n}: scan failed - {exc}")
+            session.warnings.append(f"race {n}: {exc}")
+            _close_panel(session)
+            continue
         if res.race is None:
             session.warnings.extend(res.warnings)
             session.log(f"race {n}: " + "; ".join(res.warnings))
