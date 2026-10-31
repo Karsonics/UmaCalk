@@ -19,6 +19,7 @@ from typing import Callable
 
 import cv2
 import numpy as np
+from rapidfuzz import fuzz
 
 from . import detect
 from .model import DetailCard, RaceDetail, Rect, ScoreLine, TextLine, UmaDetail
@@ -355,6 +356,28 @@ def _dump(dump_dir: str | None, race_no: int | None, index: int,
         pass
 
 
+def _thumb(img: np.ndarray, rect: Rect | None = None) -> np.ndarray:
+    crop = img[rect.y:rect.y2, rect.x:rect.x2] if rect is not None else img
+    if crop.size == 0:
+        crop = img
+    return cv2.resize(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), (24, 24),
+                      interpolation=cv2.INTER_AREA)
+
+
+def _moved(a: np.ndarray, b: np.ndarray) -> bool:
+    return float(cv2.absdiff(a, b).mean()) > 1.5
+
+
+def _canon_name(order: list[str], name: str) -> str:
+    """Map a re-read header ('Daiva Scarlet') onto the first spelling seen."""
+    for known in order:
+        if known.lower() == name.lower():
+            return known
+        if min(len(known), len(name)) >= 4 and fuzz.WRatio(known, name) >= 88:
+            return known
+    return name
+
+
 def scan_panel(
     driver,
     ocr: Ocr,
@@ -375,7 +398,15 @@ def scan_panel(
     frame, img = got
     cx = frame.panel.x + frame.panel.w // 2
     cy = frame.panel.y + frame.panel.h // 2
-    driver.scroll_at(cx, cy, 30)           # rewind: positive == up
+    # the popup opens scrolled to the clicked uma: rewind until it stops moving
+    thumb = _thumb(img, frame.panel)
+    for _ in range(60):
+        driver.scroll_at(cx, cy, 10)       # positive == up
+        shot = driver.grab()
+        cur = _thumb(shot, detect.find_panel(shot))
+        if not _moved(thumb, cur):
+            break
+        thumb = cur
     got = _grab(driver, ocr)
     if got is None:
         return DetailScan(
@@ -399,6 +430,7 @@ def scan_panel(
     owner = TEAM_OWNER
     frames = 0
     empty = 0
+    stuck = 0
 
     while frames < max_frames:
         frames += 1
@@ -411,9 +443,11 @@ def scan_panel(
         for kind, obj in frame.seq:
             if kind == "uma":
                 hd: UmaHeader = obj  # type: ignore[assignment]
+                hd.name = _canon_name(order, hd.name)
                 owner = hd.name
-                gained[hd.name] = hd.gained
-                placement[hd.name] = hd.placement
+                if hd.gained is not None or hd.name not in gained:
+                    gained[hd.name] = hd.gained or gained.get(hd.name)
+                placement[hd.name] = hd.placement or placement.get(hd.name)
                 if hd.name not in order:
                     order.append(hd.name)
             elif kind == "team":
@@ -430,8 +464,10 @@ def scan_panel(
                 if owner == TEAM_OWNER:
                     team_bonus = card
         for hd in frame.umas:
-            gained[hd.name] = hd.gained
-            placement[hd.name] = hd.placement
+            if hd.gained is not None:
+                gained[hd.name] = hd.gained
+            if hd.placement:
+                placement[hd.name] = hd.placement
             if hd.name not in order:
                 order.append(hd.name)
 
@@ -441,17 +477,25 @@ def scan_panel(
             empty += 1
         else:
             empty = 0
-        if empty >= 2:
-            say("no new cards after two scrolls - stopping")
+        if empty >= 3:
+            say("no new cards after three scrolls - stopping")
             break
 
-        driver.scroll_at(cx, cy, -1)       # down one notch
+        before = _thumb(img, frame.panel)
+        driver.scroll_at(cx, cy, -6)       # down ~1.5 cards (wheel notches)
         got = _grab(driver, ocr)
         if got is None:
             race.warnings.append("Score Details popup closed during the scan")
             say("popup closed mid-scan - stopping")
             break
         frame, img = got
+        if not _moved(before, _thumb(img, frame.panel)):
+            stuck += 1
+            if stuck >= 2:
+                say("panel stopped moving - stopping")
+                break
+        else:
+            stuck = 0
         if frame.race_no is not None and race.race_no is not None and frame.race_no != race.race_no:
             race.warnings.append(f"panel changed to race {frame.race_no} mid-scan")
             break
