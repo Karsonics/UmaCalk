@@ -285,17 +285,26 @@ def step_races(session: Session, expect: int = 5) -> list[RaceDetail]:
         if diag:
             _save_diag(diag, f"{target.distance.lower()}_after_click",
                        session.driver.grab(), session.ocr)
+        # Detail lists are long; shorten only their post-wheel settle time.
+        # Restore the configured delay before returning to the Score Info list.
+        scroll_settle = getattr(session.driver, "settle", None)
+        if scroll_settle is not None:
+            session.driver.settle = min(float(scroll_settle), 0.18)
         try:
-            res = scan_panel(
-                session.driver, session.ocr,
-                log=session.log, max_frames=cfg.max_frames,
-                dump_dir=os.path.join(diag, target.name.lower().replace(" ", "_")) if diag else None,
-            )
-        except Exception as exc:  # one broken race must not abort the rest
-            session.log(f"{target.name}: scan failed - {exc}")
-            session.warnings.append(f"{target.name}: {exc}")
-            _close_panel(session)
-            continue
+            try:
+                res = scan_panel(
+                    session.driver, session.ocr,
+                    log=session.log, max_frames=cfg.max_frames,
+                    dump_dir=os.path.join(diag, target.name.lower().replace(" ", "_")) if diag else None,
+                )
+            except Exception as exc:  # one broken race must not abort the rest
+                session.log(f"{target.name}: scan failed - {exc}")
+                session.warnings.append(f"{target.name}: {exc}")
+                _close_panel(session)
+                continue
+        finally:
+            if scroll_settle is not None:
+                session.driver.settle = scroll_settle
         if res.race is None:
             session.warnings.extend(res.warnings)
             session.log(f"{target.name}: " + "; ".join(res.warnings))
