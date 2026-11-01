@@ -81,7 +81,13 @@ class LiveDriver:
         sx, sy = self.to_screen(x, y)
         pyautogui.moveTo(sx, sy, duration=0.05)
         # pyautogui already multiplies by WHEEL_DELTA internally: one unit == one notch.
-        pyautogui.scroll(int(notches))
+        remaining = int(notches)
+        while remaining:
+            chunk = max(-6, min(6, remaining))
+            pyautogui.scroll(chunk)
+            remaining -= chunk
+            if remaining:
+                time.sleep(0.025)
         time.sleep(self.settle)
 
     def key(self, name: str) -> None:
