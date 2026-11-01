@@ -268,7 +268,7 @@ def step_races(session: Session, expect: int = 5) -> list[RaceDetail]:
 
     targets = [r for r in session.run.rows if r.score]
     pending = {r.name for r in targets}
-    all_names = list(pending)
+    all_names = [r.name for r in targets]
     scanned_umas: set[str] = set()
     scanned_races: set[tuple[int, int]] = set()
     races: list[RaceDetail] = []
@@ -324,13 +324,14 @@ def step_races(session: Session, expect: int = 5) -> list[RaceDetail]:
             if candidate is not None and fuzz.WRatio(candidate, found_name) >= 88:
                 matched[candidate] = uma
         if (res.race.class_no is None or res.race.race_no is None
-                or target.name not in matched or len(matched) != 3):
+                or target.name not in matched):
             session.log(
-                f"{target.name}: could not confirm class/race and all three teammates; "
+                f"{target.name}: could not confirm class/race or clicked uma; "
                 "leaving entries pending")
         else:
             race_key = (res.race.class_no, res.race.race_no)
             scanned_umas.update(matched)
+            scanned_umas.add(target.name)
             pending.difference_update(matched)
             if race_key not in scanned_races:
                 scanned_races.add(race_key)
@@ -338,6 +339,11 @@ def step_races(session: Session, expect: int = 5) -> list[RaceDetail]:
                 session.log(
                     f"{target.distance}: class {race_key[0]}, race {race_key[1]} captured "
                     f"({', '.join(matched)})")
+                if len(matched) < 3:
+                    msg = (f"class {race_key[0]}, race {race_key[1]}: "
+                           f"only {len(matched)}/3 teammates matched to Score Info")
+                    session.warnings.append(msg)
+                    session.log("  " + msg)
             else:
                 session.log(
                     f"class {race_key[0]}, race {race_key[1]} already captured; "
