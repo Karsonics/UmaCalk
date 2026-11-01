@@ -8,6 +8,8 @@ and a running history workbook that tracks every uma's average score over time.
 No injection, no memory reading, no traffic interception — it reads the screen and
 simulates clicks, exactly as you would yourself.
 
+(BIG TLDR ITS STILL IN REALLY EARLY DEVOLOPMENT SO ITS NOT EVEN CLOSE TO BEING DONE)
+
 ---
 
 ## What it captures
