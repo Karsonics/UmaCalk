@@ -429,7 +429,6 @@ def scan_panel(
     team_bonus: DetailCard | None = None
     owner = TEAM_OWNER
     frames = 0
-    empty = 0
     stuck = 0
 
     while frames < max_frames:
@@ -473,14 +472,6 @@ def scan_panel(
 
         say(f"frame {frames}: {len(frame.cards)} cards, {fresh} new, total {len(cards)}")
 
-        if fresh == 0:
-            empty += 1
-        else:
-            empty = 0
-        if empty >= 3:
-            say("no new cards after three scrolls - stopping")
-            break
-
         before = _thumb(img, frame.panel)
         driver.scroll_at(cx, cy, -6)       # down ~1.5 cards (wheel notches)
         got = _grab(driver, ocr)
@@ -491,7 +482,7 @@ def scan_panel(
         frame, img = got
         if not _moved(before, _thumb(img, frame.panel)):
             stuck += 1
-            if stuck >= 2:
+            if stuck >= 3:
                 say("panel stopped moving - stopping")
                 break
         else:

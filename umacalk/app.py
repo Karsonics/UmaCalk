@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Any, Callable
 
 import numpy as np
+from rapidfuzz import fuzz
 
 from . import probe as probe_mod
 from .capture import Capturer
@@ -249,14 +250,12 @@ def _find_uma_row(session: Session, name: str, tries: int = 40):
 
 
 def step_races(session: Session, expect: int = 5) -> list[RaceDetail]:
-    """Open one race's Score Details per distance, from the Score Info list.
+    """Open Score Details from Score Info and collect each race once.
 
-    Clicking a race row on the Race Results popup only opens the placing
-    summary; the itemised breakdown lives behind the (i) button of any uma in
-    that race, so one uma per distance is enough to reach each of the five.
+    A single (i) popup contains all three umas in that race. Keep walking
+    rows in Score Info display order; after a complete roster is extracted,
+    the other two rows are implicitly done.
     """
-    from .model import DISTANCES
-
     cfg = session.cfg
     _ensure_live(session)
     diag = None
@@ -267,17 +266,15 @@ def step_races(session: Session, expect: int = 5) -> list[RaceDetail]:
     if not session.run.rows:
         raise RuntimeError("scan the uma list first (Score Info), then the races")
 
-    targets = []
-    for dist in DISTANCES:
-        group = [r for r in session.run.rows if r.distance == dist and r.score]
-        if group:
-            targets.append(max(group, key=lambda r: r.score))
-
+    targets = [r for r in session.run.rows if r.score]
+    pending = {r.name for r in targets}
     races: list[RaceDetail] = []
     for target in targets:
+        if target.name not in pending:
+            continue
         frame, row, img = _find_uma_row(session, target.name)
         if row is None:
-            session.log(f"{target.name}: not found in the list, skipping {target.distance}")
+            session.log(f"{target.name}: not found in the list; leaving it pending")
             continue
         x, y = _info_point(img, frame.panel, row.y, frame.pitch)
         session.log(f"{target.distance}: opening Score Details via {target.name}")
@@ -289,23 +286,41 @@ def step_races(session: Session, expect: int = 5) -> list[RaceDetail]:
             res = scan_panel(
                 session.driver, session.ocr,
                 log=session.log, max_frames=cfg.max_frames,
-                dump_dir=os.path.join(diag, target.distance.lower()) if diag else None,
+                dump_dir=os.path.join(diag, target.name.lower().replace(" ", "_")) if diag else None,
             )
         except Exception as exc:  # one broken race must not abort the rest
-            session.log(f"{target.distance}: scan failed - {exc}")
-            session.warnings.append(f"{target.distance}: {exc}")
+            session.log(f"{target.name}: scan failed - {exc}")
+            session.warnings.append(f"{target.name}: {exc}")
             _close_panel(session)
             continue
         if res.race is None:
             session.warnings.extend(res.warnings)
-            session.log(f"{target.distance}: " + "; ".join(res.warnings))
+            session.log(f"{target.name}: " + "; ".join(res.warnings))
             _close_panel(session)
             continue
-        races.append(res.race)
         session.warnings.extend(res.race.warnings)
-        session.log(
-            f"{target.distance}: race {res.race.race_no}, {len(res.race.umas)} umas, "
-            f"{sum(len(u.cards) for u in res.race.umas)} cards")
+        extracted = {u.name: u for u in res.race.umas}
+        # OCR can vary a character in a header, so match the roster fuzzily.
+        # Teammates may have different distance labels. Match the popup roster
+        # against the full Score Info list and only complete a three-uma race
+        # when each teammate's card totals balance to their gained score.
+        matched: dict[str, Any] = {}
+        for found_name, uma in extracted.items():
+            candidate = max(pending, key=lambda name: fuzz.WRatio(name, found_name), default=None)
+            if candidate is not None and fuzz.WRatio(candidate, found_name) >= 88:
+                matched[candidate] = uma
+        incomplete = [name for name, uma in matched.items()
+                      if uma.gained is None or not uma.cards or uma.card_sum != uma.gained]
+        if target.name not in matched or len(matched) != 3 or len(extracted) != 3 or incomplete:
+            details = sorted(set(incomplete + [n for n in extracted if not any(
+                fuzz.WRatio(row_name, n) >= 88 for row_name in pending)]))
+            session.log(f"{target.name}: incomplete race extraction ({details}); will retry")
+        else:
+            races.append(res.race)
+            pending.difference_update(matched)
+            session.log(
+                f"{target.distance}: race {res.race.race_no}, {len(res.race.umas)} umas, "
+                f"{sum(len(u.cards) for u in res.race.umas)} cards")
         _close_panel(session)
     session.run.races = races
     session.run.match_total = None
