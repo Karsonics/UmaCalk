@@ -268,9 +268,12 @@ def step_races(session: Session, expect: int = 5) -> list[RaceDetail]:
 
     targets = [r for r in session.run.rows if r.score]
     pending = {r.name for r in targets}
+    all_names = list(pending)
+    scanned_umas: set[str] = set()
+    scanned_races: set[tuple[int, int]] = set()
     races: list[RaceDetail] = []
     for target in targets:
-        if target.name not in pending:
+        if target.name not in pending or target.name in scanned_umas:
             continue
         frame, row, img = _find_uma_row(session, target.name)
         if row is None:
@@ -300,27 +303,40 @@ def step_races(session: Session, expect: int = 5) -> list[RaceDetail]:
             continue
         session.warnings.extend(res.race.warnings)
         extracted = {u.name: u for u in res.race.umas}
-        # OCR can vary a character in a header, so match the roster fuzzily.
-        # Teammates may have different distance labels. Match the popup roster
-        # against the full Score Info list and only complete a three-uma race
-        # when each teammate's card totals balance to their gained score.
+        # The popup header identifies the race independently of its teammates'
+        # Score Info distance labels or individual card balance warnings.
         matched: dict[str, Any] = {}
         for found_name, uma in extracted.items():
-            candidate = max(pending, key=lambda name: fuzz.WRatio(name, found_name), default=None)
+            candidate = max(
+                (name for name in all_names if name not in matched),
+                key=lambda name: fuzz.WRatio(name, found_name),
+                default=None,
+            )
             if candidate is not None and fuzz.WRatio(candidate, found_name) >= 88:
                 matched[candidate] = uma
-        incomplete = [name for name, uma in matched.items()
-                      if uma.gained is None or not uma.cards or uma.card_sum != uma.gained]
-        if target.name not in matched or len(matched) != 3 or len(extracted) != 3 or incomplete:
-            details = sorted(set(incomplete + [n for n in extracted if not any(
-                fuzz.WRatio(row_name, n) >= 88 for row_name in pending)]))
-            session.log(f"{target.name}: incomplete race extraction ({details}); will retry")
-        else:
-            races.append(res.race)
-            pending.difference_update(matched)
+        if (res.race.class_no is None or res.race.race_no is None
+                or target.name not in matched or len(matched) != 3):
             session.log(
-                f"{target.distance}: race {res.race.race_no}, {len(res.race.umas)} umas, "
-                f"{sum(len(u.cards) for u in res.race.umas)} cards")
+                f"{target.name}: could not confirm class/race and all three teammates; "
+                "leaving entries pending")
+        else:
+            race_key = (res.race.class_no, res.race.race_no)
+            scanned_umas.update(matched)
+            pending.difference_update(matched)
+            if race_key not in scanned_races:
+                scanned_races.add(race_key)
+                races.append(res.race)
+                session.log(
+                    f"{target.distance}: class {race_key[0]}, race {race_key[1]} captured "
+                    f"({', '.join(matched)})")
+            else:
+                session.log(
+                    f"class {race_key[0]}, race {race_key[1]} already captured; "
+                    f"skipping {', '.join(matched)}")
+            if len(scanned_races) >= expect:
+                session.log(f"{len(scanned_races)} unique races captured; stopping F7 scan")
+                _close_panel(session)
+                break
         _close_panel(session)
     session.run.races = races
     session.run.match_total = None
