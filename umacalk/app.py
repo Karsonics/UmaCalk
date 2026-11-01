@@ -310,12 +310,12 @@ def step_races(session: Session, expect: int = 5) -> list[RaceDetail]:
             session.log(f"{target.name}: " + "; ".join(res.warnings))
             _close_panel(session)
             continue
-        session.warnings.extend(res.race.warnings)
-        extracted = {u.name: u for u in res.race.umas}
-        # The popup header identifies the race independently of its teammates'
-        # Score Info distance labels or individual card balance warnings.
+        # Match headers to the Score Info roster, then fold OCR aliases back
+        # into their real teammate when both readings have the same gained score.
         matched: dict[str, Any] = {}
-        for found_name, uma in extracted.items():
+        unmatched: list[Any] = []
+        for uma in res.race.umas:
+            found_name = uma.name
             candidate = max(
                 (name for name in all_names if name not in matched),
                 key=lambda name: fuzz.WRatio(name, found_name),
@@ -323,6 +323,35 @@ def step_races(session: Session, expect: int = 5) -> list[RaceDetail]:
             )
             if candidate is not None and fuzz.WRatio(candidate, found_name) >= 88:
                 matched[candidate] = uma
+                uma.name = candidate
+            else:
+                unmatched.append(uma)
+
+        for extra in unmatched:
+            same_score = [
+                uma for uma in matched.values()
+                if extra.gained is not None and uma.gained == extra.gained
+            ]
+            if len(same_score) != 1:
+                continue
+            original = same_score[0]
+            for card in extra.cards:
+                title = re.sub(r"[^a-z0-9]+", "", card.title.lower())
+                if not any(
+                    fuzz.WRatio(title, re.sub(r"[^a-z0-9]+", "", old.title.lower())) >= 92
+                    for old in original.cards
+                ):
+                    original.cards.append(card)
+            if original.placement is None:
+                original.placement = extra.placement
+            res.race.umas.remove(extra)
+            res.race.warnings = [
+                warning for warning in res.race.warnings
+                if not warning.startswith(f"{extra.name}:")
+            ]
+            session.log(f"{extra.name}: merged as an OCR duplicate of {original.name}")
+
+        session.warnings.extend(res.race.warnings)
         if (res.race.class_no is None or res.race.race_no is None
                 or target.name not in matched):
             session.log(
