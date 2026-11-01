@@ -422,7 +422,7 @@ def scan_panel(
         )
 
     race = RaceDetail(race_no=frame.race_no, class_no=frame.class_no, total=frame.total)
-    cards: dict[tuple[str, str, int | None], DetailCard] = {}
+    cards: dict[tuple[str, str], DetailCard] = {}
     order: list[str] = []
     gained: dict[str, int | None] = {}
     placement: dict[str, str | None] = {}
@@ -455,12 +455,22 @@ def scan_panel(
                 card: DetailCard = obj  # type: ignore[assignment]
                 if not card.balanced:
                     continue
-                key = (owner, card.title, card.total)
-                if key in cards:
+                card_owner = owner
+                # This card belongs to the shared Team Bonus section even when
+                # its heading has scrolled off the top of the viewport.
+                if re.sub(r"[^a-z0-9]", "", card.title.lower()) == "allmembersplaced":
+                    card_owner = TEAM_OWNER
+                title_key = re.sub(r"[^a-z0-9]+", "", clean(card.title).lower())
+                duplicate = any(
+                    existing_owner == card_owner
+                    and fuzz.WRatio(existing_title, title_key) >= 92
+                    for existing_owner, existing_title in cards
+                )
+                if duplicate:
                     continue
-                cards[key] = card
+                cards[(card_owner, title_key)] = card
                 fresh += 1
-                if owner == TEAM_OWNER:
+                if card_owner == TEAM_OWNER:
                     team_bonus = card
         for hd in frame.umas:
             if hd.gained is not None:
@@ -473,7 +483,7 @@ def scan_panel(
         say(f"frame {frames}: {len(frame.cards)} cards, {fresh} new, total {len(cards)}")
 
         before = _thumb(img, frame.panel)
-        driver.scroll_at(cx, cy, -6)       # down ~1.5 cards (wheel notches)
+        driver.scroll_at(cx, cy, -18)      # overlap several cards while moving faster
         got = _grab(driver, ocr)
         if got is None:
             race.warnings.append("Score Details popup closed during the scan")
@@ -492,7 +502,7 @@ def scan_panel(
             break
 
     by_owner: dict[str, list[DetailCard]] = {}
-    for (own, _t, _tot), card in cards.items():
+    for (own, _title), card in cards.items():
         by_owner.setdefault(own, []).append(card)
     for name in order:
         uma_cards = sorted(by_owner.get(name, []), key=lambda c: c.y)
