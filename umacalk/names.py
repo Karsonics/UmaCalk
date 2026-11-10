@@ -57,15 +57,35 @@ class NameResolver:
     learned_path: str | None = None
     extra: list[str] = field(default_factory=list)
 
+    @staticmethod
+    def _read_names(path: str) -> list[str] | None:
+        """Read and normalize a valid learned-name list; None means preserve it."""
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError, UnicodeError, RecursionError):
+            return None
+        if not isinstance(data, list):
+            return None
+        normalized: dict[str, str] = {}
+        for name in data:
+            if isinstance(name, str) and name.strip():
+                clean_name = name.strip()
+                normalized.setdefault(clean_name.casefold(), clean_name)
+        return list(normalized.values())
+
     def __post_init__(self) -> None:
         names = set(self.roster) | set(self.extra)
         if self.learned_path and os.path.exists(self.learned_path):
-            try:
-                with open(self.learned_path, encoding="utf-8") as fh:
-                    names |= set(json.load(fh))
-            except (OSError, ValueError):
-                pass
-        self._names = sorted(n for n in names if n)
+            learned = self._read_names(self.learned_path)
+            if learned is not None:
+                names |= set(learned)
+        normalized: dict[str, str] = {}
+        for name in names:
+            if isinstance(name, str) and name.strip():
+                clean_name = name.strip()
+                normalized.setdefault(clean_name.casefold(), clean_name)
+        self._names = sorted(normalized.values(), key=str.casefold)
         self._lower = {n.lower(): n for n in self._names}
 
     @property
@@ -97,18 +117,20 @@ class NameResolver:
 
     def learn(self, name: str) -> None:
         """Persist a manually corrected name so it matches exactly next time."""
-        if not self.learned_path or not name:
+        if not self.learned_path or not isinstance(name, str) or not name.strip():
             return
-        data: list[str] = []
+        name = name.strip()
         if os.path.exists(self.learned_path):
-            try:
-                with open(self.learned_path, encoding="utf-8") as fh:
-                    data = json.load(fh)
-            except (OSError, ValueError):
-                data = []
-        if name not in data:
+            data = self._read_names(self.learned_path)
+            # Do not replace an unreadable or structurally invalid user file.
+            if data is None:
+                return
+        else:
+            data = []
+        if name.casefold() not in {entry.casefold() for entry in data}:
             data.append(name)
-            os.makedirs(os.path.dirname(self.learned_path), exist_ok=True)
+            parent = os.path.dirname(os.path.abspath(self.learned_path))
+            os.makedirs(parent, exist_ok=True)
             with open(self.learned_path, "w", encoding="utf-8") as fh:
                 json.dump(sorted(data), fh, indent=2)
             self.__post_init__()

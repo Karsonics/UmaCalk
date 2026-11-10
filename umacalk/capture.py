@@ -40,6 +40,11 @@ class Capturer:
                     return
                 except Exception as exc:  # noqa: BLE001 - fall through
                     errors.append(f"{name}: {exc}")
+                    if self.name == name:
+                        self.close()
+                    self._impl = None
+                    self._mss = None
+                    self.name = ""
             raise CaptureError("no working capture backend (" + "; ".join(errors) + ")")
         finally:
             self._opening = False
@@ -81,14 +86,26 @@ class Capturer:
             cam = bettercam.create(output_color="BGR")
             if cam is None:
                 raise RuntimeError("bettercam.create() returned None")
-            cam.start(region=(x, y, x + w, y + h), target_fps=30, video_mode=False)
+            try:
+                cam.start(region=(x, y, x + w, y + h), target_fps=30, video_mode=False)
+            except Exception:
+                try:
+                    cam.stop()
+                except Exception:  # noqa: BLE001 - cleanup is best effort
+                    pass
+                raise
             return cam
         if name == "mss":
             import mss
 
             sct = mss.mss()
-            sct.grab({"left": x, "top": y, "width": w, "height": h})
             self._mss = sct
+            try:
+                sct.grab({"left": x, "top": y, "width": w, "height": h})
+            except Exception:
+                sct.close()
+                self._mss = None
+                raise
             return sct
         if name == "pil":
             from PIL import ImageGrab
@@ -100,33 +117,46 @@ class Capturer:
         if not self._opening:
             self._ensure_thread()
         x, y, w, h = self.rect
-        if self.name == "bettercam":
-            frame = self._impl.get_latest_frame()
-            if frame is None:
-                raise CaptureError("bettercam returned no frame")
-            return frame
-        if self.name == "mss":
-            shot = self._mss.grab({"left": x, "top": y, "width": w, "height": h})
-            return np.asarray(shot)[:, :, :3].copy()
-        from PIL import Image
-
-        img = self._impl.grab(bbox=(x, y, x + w, y + h), all_screens=True)
-        return np.asarray(img.convert("RGB"))[:, :, ::-1].copy()
+        try:
+            if self.name == "bettercam":
+                frame = self._impl.get_latest_frame()
+                if frame is None:
+                    raise CaptureError("bettercam returned no frame")
+                return frame
+            if self.name == "mss":
+                shot = self._mss.grab({"left": x, "top": y, "width": w, "height": h})
+                return np.asarray(shot)[:, :, :3].copy()
+            if self.name != "pil" or self._impl is None:
+                raise CaptureError("capture backend is not available")
+            img = self._impl.grab(bbox=(x, y, x + w, y + h), all_screens=True)
+            return np.asarray(img.convert("RGB"))[:, :, ::-1].copy()
+        except Exception as exc:
+            # During BetterCam startup, a few empty frames are expected while
+            # Desktop Duplication initializes; _first_frame owns that retry.
+            if not self._opening:
+                self.close()
+            if isinstance(exc, CaptureError):
+                raise
+            raise CaptureError(f"{self.backend} frame acquisition failed: {exc}") from exc
 
     def close(self) -> None:
-        if self.name == "bettercam" and self._impl is not None:
+        impl, mss_obj, name = self._impl, self._mss, self.name
+        self._impl = None
+        self._mss = None
+        self.name = ""
+        if name == "bettercam" and impl is not None:
             try:
-                self._impl.stop()
+                impl.stop()
             except Exception:  # noqa: BLE001
                 pass
-        if self.name == "mss" and self._mss is not None:
+        if mss_obj is not None:
             try:
-                self._mss.close()
+                mss_obj.close()
             except Exception:  # noqa: BLE001
                 pass
 
     @staticmethod
     def looks_black(img: np.ndarray, threshold: float = 0.985) -> bool:
-        if img is None or img.size == 0:
+        if img is None or img.size == 0 or img.ndim != 3 or img.shape[2] < 3:
             return True
         return float((img.max(axis=2) < 8).mean()) > threshold

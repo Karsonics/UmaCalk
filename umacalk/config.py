@@ -30,7 +30,17 @@ class Config:
 
     # -- helpers ------------------------------------------------------------
     def path(self, name: str) -> str:
-        return os.path.join(self.base_dir, name)
+        """Resolve a configured path and reject escapes, including symlinks."""
+        base = os.path.realpath(os.path.abspath(self.base_dir))
+        resolved = os.path.realpath(os.path.abspath(os.path.join(base, name)))
+        try:
+            common = os.path.commonpath((base, resolved))
+        except ValueError:
+            # Different Windows drives cannot share a common path.
+            common = ""
+        if os.path.normcase(common) != os.path.normcase(base):
+            raise ValueError(f"Invalid path: {name!r} escapes base directory")
+        return resolved
 
     @property
     def output_path(self) -> str:

@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import os
+import stat
+import tempfile
+import zipfile
+from xml.etree.ElementTree import ParseError
 from statistics import mean, pstdev
 
 from openpyxl import Workbook, load_workbook
@@ -25,7 +29,23 @@ def _header(ws) -> None:
 
 def _open(path: str) -> Workbook:
     if os.path.exists(path):
-        return load_workbook(path)
+        try:
+            wb = load_workbook(path)
+        except (OSError, ValueError, KeyError, IndexError, EOFError,
+                zipfile.BadZipFile, ParseError) as exc:
+            raise ValueError(f"Cannot read history workbook {path!r}: {exc}") from exc
+        if "Runs" not in wb.sheetnames:
+            wb.close()
+            raise ValueError(f"History workbook {path!r} has no 'Runs' sheet")
+        expected = ("run", "date", "distance", "uma", "score", "race total")
+        header = tuple(
+            str(cell.value).strip().casefold() if cell.value is not None else ""
+            for cell in wb["Runs"][1][:len(expected)]
+        )
+        if header != expected:
+            wb.close()
+            raise ValueError(f"History workbook {path!r} has an invalid 'Runs' header")
+        return wb
     wb = Workbook()
     ws = wb.active
     ws.title = "Runs"
@@ -34,10 +54,43 @@ def _open(path: str) -> Workbook:
     return wb
 
 
-def append_run(history_path: str, run: Run) -> str:
-    wb = _open(history_path)
+def _save_workbook_atomic(wb: Workbook, history_path: str) -> None:
+    directory = os.path.dirname(os.path.abspath(history_path))
+    os.makedirs(directory, exist_ok=True)
+    temp_path = None
+    try:
+        original_mode = (
+            stat.S_IMODE(os.stat(history_path).st_mode)
+            if os.path.exists(history_path) else None
+        )
+        fd, temp_path = tempfile.mkstemp(
+            prefix=".umacalk-history-", suffix=".xlsx", dir=directory)
+        os.close(fd)
+        wb.save(temp_path)
+        if original_mode is not None:
+            # Preserve POSIX mode bits and Windows' read-only flag where supported.
+            os.chmod(temp_path, original_mode)
+        os.replace(temp_path, history_path)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                # The saved mode may be read-only; make the temporary file
+                # removable before cleaning it up after a failed replace.
+                os.chmod(temp_path, stat.S_IREAD | stat.S_IWRITE)
+            except OSError:
+                pass
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
+
+
+def _append_run_to_workbook(wb: Workbook, history_path: str, run: Run) -> str:
     ws = wb["Runs"]
-    race_total = next((r.total for r in run.races if r.total), None)
+    # Handle case where races is None (capture failure)
+    race_total = None
+    if run.races:
+        race_total = next((r.total for r in run.races if r.total), None)
     for row in run.rows:
         ws.append([run.run_id, run.captured_at, row.distance, row.name,
                    row.score, race_total])
@@ -83,6 +136,13 @@ def append_run(history_path: str, run: Run) -> str:
         chart.set_categories(cats)
         wa.add_chart(chart, f"I{2}")
 
-    os.makedirs(os.path.dirname(history_path) or ".", exist_ok=True)
-    wb.save(history_path)
+    _save_workbook_atomic(wb, history_path)
     return history_path
+
+
+def append_run(history_path: str, run: Run) -> str:
+    wb = _open(history_path)
+    try:
+        return _append_run_to_workbook(wb, history_path, run)
+    finally:
+        wb.close()

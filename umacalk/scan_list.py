@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
@@ -32,6 +33,22 @@ class Driver(Protocol):
     def scroll_at(self, x: int, y: int, notches: int) -> None: ...
     def click_at(self, x: int, y: int) -> None: ...
     def key(self, key: str) -> None: ...
+
+
+class PanelGone(RuntimeError):
+    """The Score Info panel was not visible in a captured frame."""
+
+
+def _grab_retry(driver: Driver, ocr: Ocr, resolver: NameResolver,
+                tries: int = 3) -> ListFrame | None:
+    """Retry only transient panel-detection misses, not OCR or driver failures."""
+    for attempt in range(max(1, tries)):
+        try:
+            return parse_frame(driver.grab(), ocr, resolver)
+        except PanelGone:
+            if attempt + 1 < max(1, tries):
+                time.sleep(0.12)
+    return None
 
 
 @dataclass
@@ -80,7 +97,7 @@ def parse_frame(
 ) -> ListFrame:
     panel = detect.find_panel(img)
     if panel is None:
-        raise RuntimeError("popup panel not found - is the Score Info screen open?")
+        raise PanelGone("popup panel not found - is the Score Info screen open?")
     crop = img[panel.y:panel.y2, panel.x:panel.x2]
     bars = detect.find_bars(img, panel)  # panel-local coords
     pitch = detect.row_pitch(bars)
@@ -199,8 +216,8 @@ def scan(
 ) -> ScanResult:
     say = log or (lambda _m: None)
 
-    head = parse_frame(driver.grab(), ocr, resolver)
-    if head.panel is None:
+    head = _grab_retry(driver, ocr, resolver)
+    if head is None:
         return ScanResult(
             [], None,
             ["Score Info screen not found - open Team Trials > Race History > Score Info first"],
@@ -208,7 +225,9 @@ def scan(
     cx = head.panel.x + head.panel.w // 2
     cy = head.panel.y + head.panel.h // 2
     driver.scroll_at(cx, cy, 30)           # rewind: positive == up
-    frame = parse_frame(driver.grab(), ocr, resolver)
+    frame = _grab_retry(driver, ocr, resolver)
+    if frame is None:
+        return ScanResult([], head.panel, ["Score Info panel not visible after resetting the list"])
 
     rows: dict[str, UmaRow] = {}
     warnings: list[str] = []
@@ -224,7 +243,10 @@ def scan(
             if missing >= 2:
                 warnings.append("Score Info panel disappeared - scan stopped")
                 break
-            frame = parse_frame(driver.grab(), ocr, resolver)
+            frame = _grab_retry(driver, ocr, resolver)
+            if frame is None:
+                warnings.append("Score Info panel disappeared - scan stopped")
+                break
             continue
         missing = 0
 
@@ -269,7 +291,10 @@ def scan(
             break
 
         driver.scroll_at(cx, cy, -1)       # down one notch
-        frame = parse_frame(driver.grab(), ocr, resolver)
+        frame = _grab_retry(driver, ocr, resolver)
+        if frame is None:
+            warnings.append("Score Info panel disappeared after scrolling - scan stopped")
+            break
 
     if len(rows) < 3:
         warnings.append(f"only {len(rows)} umas read - the list may not have scrolled")
